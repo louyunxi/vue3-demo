@@ -1,4 +1,4 @@
 interface Window {
-  scroll2Bottom (): void
+  scroll2Bottom (): void;
   // dayjs: any;
 }

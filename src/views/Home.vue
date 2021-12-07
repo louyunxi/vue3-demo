@@ -1,6 +1,10 @@
 <template>
   <div class="home text-center">
-    <header v-pin:[direction]="pinPadding" style="width: 100%; text-align: center" class="max640">
+    <header
+      v-pin:[direction]="pinPadding"
+      style="width: 100%; text-align: center"
+      class="max640"
+    >
       <p>
         Stick me
         <span class="text-color">{{ pinPadding }}</span>
@@ -21,18 +25,27 @@
     </div>
     <div class="mg-b20 flex flex-center">
       自定义指令：
-      <input type="range" min="0" max="500" v-model="pinPadding" style="z-index: 9" />
+      <input
+        type="range"
+        min="0"
+        max="500"
+        v-model="pinPadding"
+        style="z-index: 9"
+      />
     </div>
     <Button type="success" @click="showToast">更改字体颜色</Button>
   </div>
 </template>
 
 <script lang="ts">
+/* eslint-disable no-undef */
 import dayjs from "dayjs";
 import { defineComponent } from "vue";
 import HelloWorld from "@/components/HelloWorld.vue"; // @ is an alias to /src
 import { Button, Dialog, Toast } from "vant";
-
+ type myQuery = {
+    data:string
+  }
 export default defineComponent({
   name: "Home",
   components: {
@@ -66,9 +79,40 @@ export default defineComponent({
         this.time = dayjs().format("YYYY-MM-DD HH:mm:ss");
       }, 1000);
     },
+    getQuery(params: myQuery) {
+      if (!params || typeof params !== "string") return {};
+      var data:string=(params as myQuery).data;
+      console.log("data",data)
+      return eval(decodeURIComponent(data));
+    },
   },
   created() {
     this.initTime();
+  },
+  mounted() {
+    const query = this.$route.query as myQuery;
+    console.log("query",query);
+    console.log(this.getQuery(query));
+    let uni = (window as any).uni;
+    document.addEventListener("UniAppJSBridgeReady", function() {
+      uni.webView.getEnv((res: any) => {
+        console.log("当前环境：" + JSON.stringify(res));
+      });
+      uni.postMessage({
+        data: {
+          name: "11111111",
+          age: 31,
+          list: [
+            { name: "5435", age: 334 },
+            { name: "5435", age: 334 },
+            { name: "5435", age: 334 },
+          ],
+        },
+      });
+      /*uni.navigateTo({
+				url: "/pages/login/login"
+			});*/
+    });
   },
   beforeUnmount() {
     clearInterval(this.timer);

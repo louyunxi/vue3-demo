@@ -12,7 +12,7 @@
       <TabbarItem icon="setting-o" replace to="/luckdraw">LuckDraw</TabbarItem>
     </Tabbar>
   </div>
-</template>
+</template> 
 
 <script lang="ts">
 import { defineComponent } from "vue";
