@@ -1,10 +1,6 @@
 <template>
   <div class="wrapper">
-    <router-view v-slot="{ Component }">
-      <transition>
-        <component :is="Component" />
-      </transition>
-    </router-view>
+    <router-view></router-view>
   </div>
 </template> 
 
@@ -15,9 +11,7 @@ export default defineComponent({
   name: "App",
   components: {},
   computed: {
-    showFooter() {
-      return this.$route.path.split("/").length < 3;
-    },
+    
   }
 })
 </script>
