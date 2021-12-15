@@ -10,9 +10,8 @@ import {
 export class Interceptors {
   instance: AxiosInstance;
   constructor() {
-    console.log('axios.create')
     this.instance = axios.create({
-      baseURL: "http://govtest.snkoudai.com",
+      baseURL: "",
       timeout: 10000,
     });
   }

@@ -1,36 +1,58 @@
 <template>
   <div class="MapSelecter">
     <div id="map"></div>
+    <Button
+      @click="submit"
+      type="primary"
+      class="customize-submit"
+      :class="{ noselect: !Boolean(landLen) }"
+      >{{ Boolean(landLen) ? `已选择${landLen}个地块` : "请选择地块" }}</Button
+    >
   </div>
 </template>
 
 <script lang="ts">
+/* eslint-disable no-undef */
+import {
+  defineComponent,
+  ref,
+  reactive,
+  toRefs,
+  onMounted,
+  watchEffect,
+} from "vue";
+import { Button } from "vant";
+import { useRoute } from "vue-router";
+import { useStore } from "vuex";
+import {
+  point as turfPoint,
+  polygon as turfPolygon,
+  booleanPointInPolygon,
+  pointOnFeature,
+} from "@turf/turf";
+import { setToken } from "../utils/set-token";
+import { getFarmInfo } from "../http/server/map";
+import L, {
+  Map,
+  Marker,
+  LayerGroup,
+  PointExpression,
+  Polygon
+} from "leaflet";
+import "leaflet/dist/leaflet.css";
+import { Toast } from "vant";
 interface optionType {
   color: string;
   fillColor: string;
   fillOpacity: number;
-  className: string;
   weight: number;
 }
-/* eslint-disable no-undef */
-import { defineComponent, onMounted } from "vue";
-import { useRoute } from "vue-router";
-import { setToken } from "../utils/set-token";
-import { getFarmInfo } from "../http/server/map";
-import L, {
-  map,
-  Map,
-  Marker,
-  layerGroup,
-  LayerGroup,
-  PointExpression,
-  Polygon,
-  Point,
-  PointTuple,
-} from "leaflet";
-import "leaflet/dist/leaflet.css";
 type queryType = {
-  data: string;
+  baseUrl: string;
+  token: string;
+  farmId: string;
+  landIds?: Array<number>;
+  location?: Array<number>;
 };
 type landItemType = {
   companyId: number;
@@ -58,12 +80,10 @@ type landItemType = {
   select: boolean;
   markerCenter: Array<string>;
 };
-type iconOption = {
-  wh: Array<string | number>;
-  anchor: Array<string | number>;
-  markerImage: string;
-  center: Array<string | number>;
-};
+interface selectLandType {
+  landIds: number[];
+  landLen: number;
+}
 const markerMap = {
   noselected: require("../assets/images/map/marker_0.png"),
   selected: require("../assets/images/map/marker_1.png"),
@@ -71,11 +91,168 @@ const markerMap = {
 };
 export default defineComponent({
   name: "MapSelecter",
-  components: {},
   data() {
     return {};
   },
   setup() {
+    document.title = "在地图上选择地块";
+    const getQuery = (data: string): any => {
+      if (!data) return "";
+      return JSON.parse(decodeURIComponent(data));
+    };
+    /* document.addEventListener("UniAppJSBridgeReady", function() {
+      let uni = (window as any).uni;
+      uni.webView.getEnv((res: any) => {
+        console.log("当前环境：" + JSON.stringify(res));
+      });
+    }); */
+    let landList: Array<landItemType> = reactive([]);
+    let selectLands: selectLandType = reactive({
+      landIds: [],
+      landLen: 0,
+    });
+    let selectLandLayer = L.layerGroup([]);
+    let selectMarker: Array<Marker> = [];
+    let selectMarkerLayer: LayerGroup = L.layerGroup([]);
+    onMounted(async () => {
+      const route = useRoute();
+      const queryStr: string =
+        (route.query && (route.query.data as string)) || "";
+      let query: queryType = getQuery(queryStr);
+      if (!query.token || !query.farmId) return;
+      let map:Map | undefined=await initModules(
+        query.baseUrl,
+        query.token,
+        query.farmId,
+        query.location
+      );
+      if(!map) return;
+      if (
+        Reflect.has(query, "landIds") &&
+        Array.isArray(query.landIds) &&
+        query.landIds.length
+      ) {
+        landList.map((item) => {
+          if ((query.landIds as Array<number>).includes(item.id)) {
+            item.select = true;
+          }
+        });
+        initSelectLandAndMarker(
+          false,
+          landList,
+          selectLandLayer,
+          selectMarker,
+          selectMarkerLayer,
+          map.getZoom()
+        );
+      }
+      watchEffect(() => {
+        var selects = (landList as Array<landItemType>).filter(
+          (item) => item.select
+        );
+        selectLands.landIds = selects.map((item) => item.id);
+        selectLands.landLen = selects.length;
+      });
+    });
+    function submit() {
+      console.log(selectLands.landIds);
+      postMessage(selectLands.landIds);
+    }
+    const initModules = async (
+      baseUrl: string,
+      token: string,
+      farmId: string,
+      location: number[] | undefined
+    ):Promise<Map | undefined> => {
+      // 拉取数据
+      setToken(token);
+      var result: any = await getFarmInfo(baseUrl, { farmId: farmId });
+      let lands: Array<landItemType> = result.obj.landAndPlantPlanListVOS;
+      lands.map((item: landItemType) => {
+        item.select = false;
+        item.disable = false;
+      });
+      landList.push(...lands);
+      // 初始化地图
+      var map: Map = initMap("map");
+      // 地图聚焦
+      const hasPathLandNum = hasPathLandfn(landList);
+      if (!hasPathLandNum) {
+        Toast("当前主体未绘制任何地块");
+        return;
+      }
+      location &&
+        location.length &&
+        initUserLocationPopup(map, location[1], location[0]);
+      initMapPosition(map, landList);
+      selectLandLayer.addTo(map);
+      selectMarkerLayer.addTo(map);
+      // 中心点坐标矫正
+      landList.forEach((landData: landItemType) => {
+        if (
+          !landData["path"] ||
+          !(JSON.parse(landData["path"]) instanceof Array)
+        )
+          return;
+        if (
+          !thePointInPolygon(
+            [JSON.parse(landData["path"])],
+            [
+              parseFloat(landData["landCenterLat"]),
+              parseFloat(landData["landCenterLng"]),
+            ]
+          )
+        ) {
+          var center = pointOnFeature(
+            turfPolygon([JSON.parse(landData["path"])])
+          );
+          landData["landCenterLat"] = center.geometry.coordinates[0].toString();
+          landData["landCenterLng"] = center.geometry.coordinates[1].toString();
+        }
+      });
+      //渲染地块和marker点
+      var nowZoom: number = map.getZoom();
+
+      // 展示层 作物marker land
+      let markersLayer: LayerGroup = L.layerGroup([]).addTo(map);
+      //绘制作物图标
+      var cropmarkers = undateMarkers(
+        true,
+        false,
+        landList,
+        markersLayer,
+        nowZoom
+      );
+      // 选择层 选择marker 选中land
+      var [selectlands, selectmarkers] = initSelectLandAndMarker(
+        true,
+        landList,
+        selectLandLayer,
+        selectMarker,
+        selectMarkerLayer,
+        nowZoom
+      );
+      // 点击可选图层 点击事件绑定
+      const activeLandNoShakeFn = activeLandNoShake();
+      ([...cropmarkers, ...selectlands, ...selectmarkers] as [
+        Polygon | Marker
+      ]).map((landPolygon: Polygon | Marker) => {
+        landPolygon.on("click", function(e: any) {
+          var flagId = e.target.flagId;
+          var landId = flagId.split("_")[0];
+          activeLandNoShakeFn(
+            landId,
+            landList,
+            selectLandLayer,
+            selectMarker,
+            selectMarkerLayer,
+            map.getZoom()
+          );
+        });
+      });
+      mapEvent(map, landList, markersLayer, selectMarkerLayer);
+      return map;
+    };
     const initMap = (el: string | HTMLElement): Map => {
       let map: Map = L.map(el, {
         minZoom: 3,
@@ -97,37 +274,29 @@ export default defineComponent({
     const mapEvent = (
       map: Map,
       landList: Array<landItemType>,
-      allMarker: Array<Marker>,
-      allMarkerLayer: LayerGroup
+      cropMarkersLayer: LayerGroup,
+      selectMarkersLayer: LayerGroup
     ): void => {
       // 地图点击
       map.on("click", (e: Record<string, any>) => {
-        console.log(e);
+        console.log(e.latlng);
       });
-      // 地图缩放
-      /* map.on('zoomstart', function () {
-                $('.leaflet-map-pane canvas.leaflet-canvas-icon-layer').css('visibility', 'hidden');
-            });
-            map.on('zoomend', function () {
-                $('.leaflet-map-pane canvas.leaflet-canvas-icon-layer').css('visibility', 'visible');
-            }); */
       map.on("zoom", (e: Record<string, any>) => {
-        console.log(e);
         //根据zoom变化 更新marker显示
-        refreshMarker(
-          map,
-          landList,
-          allMarker,
-          allMarkerLayer,
+        undateMarkers(false, false, landList, cropMarkersLayer, e.target._zoom);
+        undateMarkers(
           false,
+          true,
+          landList,
+          selectMarkersLayer,
           e.target._zoom
         );
         return;
       });
     };
-    const hasPathLandfn = (areaList: Array<landItemType>): number => {
+    const hasPathLandfn = (landList: Array<landItemType>): number => {
       var haspathland = 0;
-      areaList.forEach((landData) => {
+      landList.forEach((landData) => {
         if (
           !landData["path"] ||
           !(JSON.parse(landData["path"]) instanceof Array)
@@ -137,136 +306,114 @@ export default defineComponent({
       });
       return haspathland;
     };
-    const initLandAndMarker = (
-      map: Map,
-      areaList: Array<landItemType>,
-      allMarker: Array<Marker>,
-      allMarkerLayer: LayerGroup,
-      zoom = 14,
-      onlyMarker = false
-    ) => {
-      let allpolygon: Array<Polygon> = [];
-      //绘制多边形地块
-      if (!onlyMarker) {
-        areaList.forEach((landData) => {
-          if (
-            !landData["path"] ||
-            !(JSON.parse(landData["path"]) instanceof Array)
-          )
-            return null;
-          let landPath = JSON.parse(landData["path"]);
-          let landPolygon: Polygon = initPolygon(
-            landPath,
-            landData["fillColor"],
-            landData["fillColor"],
-            0.3
-          );
-          allpolygon.push(landPolygon);
-        });
-        let polygonsLayer = L.layerGroup(allpolygon); //地块轮廓 合并成组 一次性添加
-        polygonsLayer.addTo(map);
-      }
-
+    const initSelectLandAndMarker = (
+      isInit = false,
+      landList: Array<landItemType>,
+      landLayer: LayerGroup,
+      markers: Array<Marker>,
+      markersLayer: LayerGroup,
+      zoom = 14
+    ): [Array<Polygon>, Array<Marker>] => {
+      //初始化选择层 制多边形对象
+      let allpolygon: Array<Polygon> = updateLands(isInit, landList, landLayer);
+      allpolygon.map((polygon) => {
+        (polygon as any).type = "polygon";
+        landLayer.addLayer(polygon);
+      });
       //初始化 选择作物图标层
-      allMarker.length && clearMarkersFromLayer(allMarkerLayer, allMarker); //清空已绘制marker
-      //绘制选择作物图标
-      areaList.forEach((landData: landItemType) => {
+      //markers.length && clearMarkersFromLayer(markersLayer, markers); //清空已绘制marker
+      //绘制选择按钮
+      markers = undateMarkers(isInit, true, landList, markersLayer, zoom);
+      return [allpolygon, markers];
+    };
+    const updateLands = (
+      isInit = false,
+      landList: Array<landItemType>,
+      landLayer?: LayerGroup | undefined
+    ): Array<Polygon> => {
+      //初始化选择层 制多边形对象
+      let allpolygon: Array<Polygon> = [];
+      landList.forEach((landData) => {
         if (
           !landData["path"] ||
           !(JSON.parse(landData["path"]) instanceof Array)
         )
           return;
-        var markerImages: Array<string> = landData["cropList"].map(
-          (item) => item["imgUrl"]
-        );
-        var markerCenter = [
-          landData["landCenterLat"],
-          landData["landCenterLng"],
-        ];
-        //是否是小于两亩的地块
-        var unit = [0, 666.7, 66.67, 1];
-        var landAcre =
-          unit[landData["landAcreUnit"]] *
-          parseFloat(landData["landAcre"] as string);
-        var isSmallArea = landAcre < 1333.5 ? true : false; //是否为小于2亩的小地块   //marker显示 特殊处理
-        var landIconOptions = getLandMarkerOptions(
-          zoom,
-          markerCenter,
-          markerImages,
-          isSmallArea,
-          1
-        ); //获取单个地块下 所有图标 样式
-        var landMarker = landIconOptions.map((option: Record<string, any>) => {
-          var marker = initMarker(
-            option.markerImage,
-            option.wh,
-            option.anchor,
-            option.center
-          );
-          allMarkerLayer.addLayer(marker);
-          return marker;
-        });
-        allMarker.push(...landMarker);
-      });
-    };
-    const initSelectLandAndMarker = (
-      map: Map,
-      areaList: Array<landItemType>,
-      allMarker: Array<Marker>,
-      allMarkerLayer: LayerGroup,
-      zoom = 14,
-      onlyMarker = false
-    ) => {
-      //初始化选择层 制多边形对象
-      if (!onlyMarker) {
-        let allpolygon: Array<Polygon> = [];
-        areaList.forEach((landData) => {
-          if (
-            !landData["path"] ||
-            !(JSON.parse(landData["path"]) instanceof Array)
-          )
-            return;
-          var landPath = JSON.parse(landData["path"]);
-          var fillColor = "rgba(0,0,0,0)",
-            opacity = 0.5,
-            borderColor = "#000";
-          if (landData["disable"]) {
-            fillColor = "#fff";
-            borderColor = "rgba(0,0,0,0.5)";
-            fillColor = "rgba(0,0,0,0.5)";
-          } else {
-            borderColor = "rgba(0,0,0,0)";
-            fillColor = "rgba(0,0,0,1)";
-          }
-          var landPolygon: Polygon = initPolygon(
+        var landPath = JSON.parse(landData["path"]);
+        var fillColor = "rgba(0,0,0,0)",
+          opacity = 0.3,
+          borderColor = "#000",
+          weight = 2;
+        if (landData["disable"]) {
+          fillColor = "#fff";
+          borderColor = "rgba(0,0,0,0.5)";
+          fillColor = "rgba(0,0,0,0.5)";
+        } else if (landData["select"]) {
+          fillColor = landData["fillColor"];
+          borderColor = "rgba(255,255,255,0.8)";
+          weight = 3;
+          opacity = 0.7;
+        } else {
+          fillColor = landData["fillColor"];
+          borderColor = landData["fillColor"];
+        }
+        var landPolygon: Polygon | undefined;
+        if (isInit) {
+          landPolygon = initPolygon(
             landPath,
             borderColor,
             fillColor,
-            opacity
+            opacity,
+            weight
           );
-          allpolygon.push(landPolygon);
-        });
-        let polygonsLayer = L.layerGroup(allpolygon); //地块轮廓 合并成组 一次性添加
-        polygonsLayer.addTo(map);
-      }
-      //初始化 选择作物图标层
-      allMarker.length && clearMarkersFromLayer(allMarkerLayer, allMarker); //清空已绘制marker
+        } else {
+          var landPolygons: Array<Polygon | any> =
+            (landLayer && landLayer.getLayers()) || [];
+          var polygon = landPolygons.find((polygon) => {
+            return polygon.flagId === landData.id.toString();
+          });
+          landPolygon = updatePolygon(
+            polygon,
+            landPath,
+            borderColor,
+            fillColor,
+            opacity,
+            weight
+          );
+        }
+        let flagId = `${landData.id}`;
+        (landPolygon as any).flagId = flagId;
+        allpolygon.push(landPolygon);
+      });
+      return allpolygon;
+    };
+    const undateMarkers = (
+      isInit = false,
+      isSelectMarker = false,
+      landList: Array<landItemType>,
+      markersLayer: LayerGroup,
+      zoom = 14
+    ): Array<Marker> => {
+      let markers: Array<Marker | any> = markersLayer.getLayers() || [];
       //绘制选择按钮
-      areaList.forEach((landData) => {
+      landList.forEach((landData) => {
         if (
           !landData["path"] ||
           !(JSON.parse(landData["path"]) instanceof Array)
         )
           return;
-        //获取单个地块下 所有图标 样式
-        var landPath = JSON.parse(landData["path"]);
         //绘制地块种植物 marker点
-        var markerImages = [markerMap.noselected];
-        if (landData["select"]) {
-          markerImages = [markerMap.selected];
-        }
-        if (landData["disable"]) {
-          markerImages = [markerMap.disable];
+        var markerImages: Array<string> | undefined;
+        if (isSelectMarker) {
+          markerImages = [markerMap.noselected];
+          if (landData["select"]) {
+            markerImages = [markerMap.selected];
+          }
+          if (landData["disable"]) {
+            markerImages = [markerMap.disable];
+          }
+        } else {
+          markerImages = landData["cropList"].map((item) => item["imgUrl"]);
         }
         var markerCenter = [
           landData["landCenterLat"],
@@ -275,41 +422,80 @@ export default defineComponent({
         if (landData.markerCenter) {
           markerCenter = landData.markerCenter;
         }
+        //获取单个地块下 所有图标 样式
         var landIconOptions = getLandMarkerOptions(
           zoom,
           markerCenter,
           markerImages,
           false,
-          2
-        ); //获取单个地块下 所有图标 样式
+          isSelectMarker ? 2 : 1
+        );
         //初始化单个地块下 所有图标
-        var landMarker = landIconOptions.map((option) => {
-          var marker = initMarker(
-            option.markerImage,
-            option.wh,
-            option.anchor,
-            option.center as Array<number>
-          );
-          allMarkerLayer.addLayer(marker);
-          return marker;
-        });
-        allMarker.push(...landMarker);
+        if (isInit) {
+          var landMarker = landIconOptions.map((option, index) => {
+            var marker = initMarker(
+              option.markerImage,
+              option.wh,
+              option.anchor,
+              option.center as Array<number>
+            );
+            markersLayer.addLayer(marker);
+            let flagId = `${landData.id}_${index}`;
+            (marker as any).flagId = flagId;
+            return marker;
+          });
+          markers.push(...landMarker);
+        } else {
+          landIconOptions.map((option, index) => {
+            let flagId = `${landData.id}_${index}`;
+            var tempMarker: Marker | undefined = markers.find(
+              (item) => (item as any).flagId === flagId
+            );
+            if (!tempMarker) return;
+            updateMarker(
+              tempMarker,
+              option.markerImage,
+              option.wh,
+              option.anchor,
+              option.center as Array<number>
+            );
+          });
+        }
       });
+      return markers;
     };
     const initPolygon = (
       path: Array<any>,
       bordercolor: string,
       fillcolor: string,
-      fillOpacity: number
+      fillOpacity: number,
+      weight: number
     ) => {
       var option: optionType = {
         color: bordercolor || "#64C3A4",
         fillColor: fillcolor || "#64C3A4",
         fillOpacity: fillOpacity || 0.5,
-        className: "polygonbox",
-        weight: 2,
+        weight: weight || 2,
       };
       var polygon: Polygon = L.polygon(path, option);
+      return polygon;
+    };
+    const updatePolygon = (
+      polygon: Polygon,
+      path: Array<any>,
+      bordercolor: string,
+      fillcolor: string,
+      fillOpacity: number,
+      weight: number
+    ): Polygon => {
+      var option: optionType = {
+        color: bordercolor || "#64C3A4",
+        fillColor: fillcolor || "#64C3A4",
+        fillOpacity: fillOpacity || 0.5,
+        weight: weight || 2,
+      };
+      polygon.setLatLngs(path);
+      polygon.setStyle(option);
       return polygon;
     };
     const initMarker = (
@@ -331,6 +517,26 @@ export default defineComponent({
           }),
         }
       );
+    };
+    const updateMarker = (
+      marker: Marker,
+      iconUrl: string,
+      iconSize: Array<number>,
+      iconAnchor: Array<number>,
+      centerlatlng: Array<number>
+    ) => {
+      marker.setLatLng({
+        lat: centerlatlng[0],
+        lng: centerlatlng[1],
+      });
+      marker.setIcon(
+        L.icon({
+          iconUrl: iconUrl,
+          iconSize: iconSize as PointExpression, //大小
+          iconAnchor: iconAnchor as PointExpression, //偏移位置
+        })
+      );
+      return marker;
     };
     const initMapPosition = async (
       map: Record<string, any>,
@@ -354,12 +560,6 @@ export default defineComponent({
       } else if (!otherGroupLandList.length && demoLandList.length) {
         //3. 农场无地块轮廓 只有演示地块 演示地块为中心
         await initLandsPosition(map, demoLandList);
-      } else {
-        //4. 农场无地块轮廓 农场地址坐标为中心
-        //没有轮廓地块 定位到农场位置
-        /* var {farmDetailVO} = await this.getFarmInfo(this.pageParams.company, this.pageParams.farm);
-        if (!farmDetailVO) return;
-        await goFarmPosition(this.map, farmDetailVO, mapTools.addressGetLocation.bind(mapTools)); */
       }
     };
     const initLandsPosition = async (
@@ -382,15 +582,6 @@ export default defineComponent({
       var allzoom = map.getBoundsZoom(bigpolygon);
       var allcenter = bigpolygon.getCenter();
       map.setView({ lat: allcenter.lat, lng: allcenter.lng }, allzoom);
-    };
-    const clearMarkersFromLayer = (
-      markerLayer: LayerGroup,
-      allMarker: Marker[] = []
-    ) => {
-      allMarker.forEach(function(marker: Marker) {
-        markerLayer.removeLayer(marker);
-      });
-      allMarker.length = 0;
     };
     const getLandMarkerOptions = (
       zoom: number,
@@ -611,108 +802,116 @@ export default defineComponent({
         return imgsrc;
       }
     };
-    const refreshMarker = (
+    const thePointInPolygon = (path: Array<any>, point: Array<number>) => {
+      return booleanPointInPolygon(turfPoint(point), turfPolygon(path));
+    };
+    const initUserLocationPopup = (
       map: Map,
-      landList: Array<landItemType>,
-      allMarker: Array<Marker>,
-      allMarkerLayer: LayerGroup,
-      onlySelectMaker = false,
-      zoom: number
-    ) => {
-      zoom = zoom || map.getZoom();
-      !onlySelectMaker &&
-        initLandAndMarker(map, landList, allMarker, allMarkerLayer, zoom, true);
-      initSelectLandAndMarker(
-        map,
-        landList,
-        allMarker,
-        allMarkerLayer,
-        zoom,
-        true
-      );
+      lat: number,
+      lng: number
+    ): void => {
+      L.popup({
+        className: "user-location",
+        closeButton: false,
+        closeOnClick: false,
+      })
+        .setLatLng({ lon: lng, lat: lat } as any)
+        .setContent(`<img src="${require("../assets/images/map/user.png")}"/>`)
+        .openOn(map);
     };
-    /* const goFarmPosition=async (map, farmDetailVO, addressGetLocation) => {
-      var address = '';
-      address += farmDetailVO.provinceName ? farmDetailVO.provinceName : '';
-      address += farmDetailVO.cityName ? farmDetailVO.cityName : '';
-      address += farmDetailVO.countyName ? farmDetailVO.countyName : '';
-      address += farmDetailVO.farmAddress ? farmDetailVO.farmAddress : '';
-      var result = await addressGetLocation(address);
-      if (result) {
-        map.setView({lat: result[0], lng: result[1]}, 13);
-      }
-    }; */
-    const getQuery = (params: queryType): string => {
-      if (!params || typeof params !== "string") return "";
-      var data: string = (params as queryType).data;
-      return eval(decodeURIComponent(data));
-    };
-
-    const init = async () => {
-      const route = useRoute();
-      const query = route.query;
+    const postMessage = (data: Array<number>) => {
       let uni = (window as any).uni;
-      console.log(query);
-      document.addEventListener("UniAppJSBridgeReady", function() {
-        uni.webView.getEnv((res: any) => {
-          console.log("当前环境：" + JSON.stringify(res));
-        });
-        //uni.openLocation
-        console.log(uni);
-        uni.postMessage({
-          data: {
-            name: "11111111",
-            age: 31,
-            list: [
-              { name: "5435", age: 334 },
-              { name: "5435", age: 334 },
-              { name: "5435", age: 334 },
-            ],
-          },
-        });
+      //uni.openLocation
+      uni.postMessage({
+        data: data,
       });
-
-      setToken("gov_token_265_1_65f682a182864130af155ec879e062eb");
-      var result: any = await getFarmInfo({
-        farmId: "3498",
+      uni.navigateBack({
+        delta: 1
       });
-      let landList = result.obj.landAndPlantPlanListVOS;
-      console.log(result);
-      var map: Map = initMap("map");
-
-      initMapPosition(map, landList);
-      //渲染地块和marker点
-      var nowZoom: number = map.getZoom();
-      const hasPathLandNum = hasPathLandfn(landList);
-      let allMarkerLayer: LayerGroup = L.layerGroup([]).addTo(map);
-      let allMarker: Array<Marker> = [];
-      //allMarkerLayer._canvas.className += ' cropMarkerLayer'; //marker 层canvas 加样式
-      let layer = initLandAndMarker(
-        map,
-        landList,
-        allMarker,
-        allMarkerLayer,
-        nowZoom
-      );
-      let allSelectMarker: Array<Marker> = [];
-      let allSelectMarkerLayer: LayerGroup = L.layerGroup([]).addTo(map);
-      initSelectLandAndMarker(
-        map,
-        landList,
-        allSelectMarker,
-        allSelectMarkerLayer,
-        nowZoom
-      );
-      mapEvent(map, landList, allSelectMarker, allSelectMarkerLayer);
-      console.log(layer);
     };
-    document.title = "在地图上选择地块";
-    onMounted(async () => {
-      await init();
-    });
+    const activeLandNoShake = () => {
+      let timer: number = +new Date();
+      return (
+        landId: number,
+        landList: Array<landItemType>,
+        landLayer: LayerGroup,
+        markers: Array<Marker>,
+        markersLayer: LayerGroup,
+        zoom = 14
+      ) => {
+        if (+new Date() - timer < 200) return;
+        timer = +new Date();
+        activeLand(landId, landList, landLayer, markers, markersLayer, zoom);
+      };
+    };
+    const activeLand = (
+      landId: number,
+      landList: Array<landItemType>,
+      landLayer: LayerGroup,
+      markers: Array<Marker>,
+      markersLayer: LayerGroup,
+      zoom = 14
+    ): void => {
+      landList.map((land) => {
+        if (Number(land.id) === Number(landId)) {
+          land.select = !land.select;
+        }
+      });
+      initSelectLandAndMarker(
+        false,
+        landList,
+        landLayer,
+        markers,
+        markersLayer,
+        zoom
+      );
+    };
+    return {
+      ...toRefs(selectLands),
+      submit,
+    };
+  },
+  components: {
+    Button,
   },
 });
 </script>
+<style lang="stylus">
+.user-location{
+  padding: 0 0 0.18rem 0;
+  margin-bottom:0;
+  .leaflet-popup-content{
+    width: 26px;
+    height: 34px;
+    margin:0;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    img{
+      width:0.4rem;
+    }
+  }
+  .leaflet-popup-content-wrapper{
+    background-color:#30cea8;
+    padding: 0;
+    border-radius:2px;
+  }
+  .leaflet-popup-tip{
+     background-color:#30cea8;
+  }
+  .leaflet-popup-tip-container{
+    width: 0.2rem;
+    height: 0.2rem;
+    margin: 0 0 0.18rem -0.1rem;
+    bottom: -0.15rem;
+  }
+  .leaflet-popup-tip {
+    width: 0.1rem;
+    height: 0.1rem;
+    margin: 0 auto 0;
+  }
+}
+</style>
 <style scoped lang="stylus">
 .MapSelecter{
   width:100vw;
@@ -721,6 +920,26 @@ export default defineComponent({
   #map{
     width: 100%;
     height: 100%;
+    background:#000;
+    >>> .leaflet-pane .leaflet-tile-pane{
+      opacity:0.6;
+    }
+  }
+  .customize-submit{
+    width:327px;
+    height:36px;
+    line-height:36px;
+    border-radius:2px;
+    position:absolute;
+    bottom:18px;left:50%;
+    transform:translate(-50%,0);
+    background-color:#22B07D;
+    border-color:#22B07D;
+    z-index:9999;
+    &.noselect{
+      background-color:#9FDECF;
+      border-color:#9FDECF;
+    }
   }
 }
 </style>
